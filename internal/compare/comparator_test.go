@@ -90,6 +90,70 @@ func TestCompareFailsExcessiveIncompleteTraceRate(t *testing.T) {
 	}
 }
 
+func TestCompareCalculatesIncompleteTraceRateWithoutIntegerOverflow(t *testing.T) {
+	document := fixtureBaseline()
+	candidate := cloneObservation(document.Observed)
+	candidate.Evidence = analyze.Evidence{Complete: math.MaxInt, Incomplete: math.MaxInt}
+
+	result, err := Compare(document, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireFinding(t, result, "incomplete_trace_rate")
+}
+
+func TestCompareRejectsDuplicateObservations(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*baseline.Document, *analyze.Observation)
+		wantString string
+	}{
+		{
+			name: "baseline node",
+			mutate: func(document *baseline.Document, _ *analyze.Observation) {
+				document.Observed.Nodes = append(document.Observed.Nodes, document.Observed.Nodes[0])
+			},
+			wantString: "duplicate node observation in baseline: gateway/checkout/SERVER",
+		},
+		{
+			name: "candidate node",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes = append(candidate.Nodes, candidate.Nodes[0])
+			},
+			wantString: "duplicate node observation in candidate: gateway/checkout/SERVER",
+		},
+		{
+			name: "baseline edge",
+			mutate: func(document *baseline.Document, _ *analyze.Observation) {
+				document.Observed.Edges = append(document.Observed.Edges, document.Observed.Edges[0])
+			},
+			wantString: "duplicate edge observation in baseline: gateway/checkout/SERVER -> gateway/db.query/CLIENT",
+		},
+		{
+			name: "candidate edge",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Edges = append(candidate.Edges, candidate.Edges[0])
+			},
+			wantString: "duplicate edge observation in candidate: gateway/checkout/SERVER -> gateway/db.query/CLIENT",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document := fixtureBaseline()
+			candidate := cloneObservation(document.Observed)
+			test.mutate(&document, &candidate)
+
+			_, err := Compare(document, candidate)
+			if err == nil {
+				t.Fatal("Compare succeeded")
+			}
+			if err.Error() != test.wantString {
+				t.Fatalf("error = %q, want %q", err, test.wantString)
+			}
+		})
+	}
+}
+
 func TestCompareRequiresTwentySamplesForBlockingP95(t *testing.T) {
 	document := fixtureBaselineWithP95Budget(600 * time.Millisecond)
 	candidate := cloneObservation(document.Observed)

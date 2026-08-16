@@ -33,10 +33,22 @@ func Compare(document baseline.Document, candidate analyze.Observation) (Result,
 		return Result{}, fmt.Errorf("%w: capture produced no comparable traces", ErrNoComparableTraces)
 	}
 
-	baseNodes := indexNodes(document.Observed.Nodes)
-	candidateNodes := indexNodes(candidate.Nodes)
-	baseEdges := indexEdges(document.Observed.Edges)
-	candidateEdges := indexEdges(candidate.Edges)
+	baseNodes, err := indexNodes(document.Observed.Nodes, "baseline")
+	if err != nil {
+		return Result{}, err
+	}
+	candidateNodes, err := indexNodes(candidate.Nodes, "candidate")
+	if err != nil {
+		return Result{}, err
+	}
+	baseEdges, err := indexEdges(document.Observed.Edges, "baseline")
+	if err != nil {
+		return Result{}, err
+	}
+	candidateEdges, err := indexEdges(candidate.Edges, "candidate")
+	if err != nil {
+		return Result{}, err
+	}
 
 	findings := compareNodes(document, baseNodes, candidateNodes)
 	findings = append(findings, compareEdges(document, baseEdges, candidateEdges)...)
@@ -53,20 +65,26 @@ func Compare(document baseline.Document, candidate analyze.Observation) (Result,
 	return Result{Outcome: reduceOutcome(findings), Findings: findings}, nil
 }
 
-func indexNodes(nodes []analyze.NodeObservation) map[model.NodeKey]analyze.NodeObservation {
+func indexNodes(nodes []analyze.NodeObservation, source string) (map[model.NodeKey]analyze.NodeObservation, error) {
 	indexed := make(map[model.NodeKey]analyze.NodeObservation, len(nodes))
 	for _, node := range nodes {
+		if _, exists := indexed[node.Key]; exists {
+			return nil, fmt.Errorf("duplicate node observation in %s: %s", source, node.Key.String())
+		}
 		indexed[node.Key] = node
 	}
-	return indexed
+	return indexed, nil
 }
 
-func indexEdges(edges []analyze.EdgeObservation) map[model.EdgeKey]analyze.EdgeObservation {
+func indexEdges(edges []analyze.EdgeObservation, source string) (map[model.EdgeKey]analyze.EdgeObservation, error) {
 	indexed := make(map[model.EdgeKey]analyze.EdgeObservation, len(edges))
 	for _, edge := range edges {
+		if _, exists := indexed[edge.Key]; exists {
+			return nil, fmt.Errorf("duplicate edge observation in %s: %s", source, edgeSubject(edge.Key))
+		}
 		indexed[edge.Key] = edge
 	}
-	return indexed
+	return indexed, nil
 }
 
 func compareNodes(document baseline.Document, base, candidate map[model.NodeKey]analyze.NodeObservation) []model.Finding {
@@ -125,11 +143,11 @@ func compareEdges(document baseline.Document, base, candidate map[model.EdgeKey]
 }
 
 func compareEvidence(policy baseline.RatePolicy, evidence analyze.Evidence) []model.Finding {
-	denominator := evidence.Complete + evidence.Incomplete
+	denominator := float64(evidence.Complete) + float64(evidence.Incomplete)
 	if denominator == 0 {
 		return nil
 	}
-	rate := float64(evidence.Incomplete) / float64(denominator)
+	rate := float64(evidence.Incomplete) / denominator
 	if rate <= policy.Max {
 		return nil
 	}
