@@ -1,2 +1,5 @@
 .superpowers/
 .worktrees/
+PROJECT_STATUS.md
+docs/architecture/design.md
+docs/implementation-plan.md
