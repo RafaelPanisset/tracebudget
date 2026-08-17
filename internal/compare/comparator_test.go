@@ -23,6 +23,7 @@ func TestCompareDefaultPolicies(t *testing.T) {
 		{"new error", addNewError, "new_error", model.SeverityFail},
 		{"new cross service edge", addCrossServiceEdge, "new_service_edge", model.SeverityFail},
 		{"new client dependency", addClientNode, "new_external_dependency", model.SeverityFail},
+		{"new producer dependency", addProducerNode, "new_external_dependency", model.SeverityFail},
 		{"new internal span", addInternalNode, "new_internal_node", model.SeverityWarn},
 		{"count increase", increaseNodeMaximum, "count_increase", model.SeverityFail},
 		{"latency increase", increaseP95, "latency_increase", model.SeverityWarn},
@@ -42,6 +43,23 @@ func TestCompareDefaultPolicies(t *testing.T) {
 				t.Fatalf("severity = %s, want %s", finding.Severity, test.severity)
 			}
 		})
+	}
+}
+
+func TestCompareNewFailingInternalNodeFailsUnderDefaultPolicies(t *testing.T) {
+	document := fixtureBaseline()
+	candidate := cloneObservation(document.Observed)
+	addInternalNode(&candidate)
+	candidate.Nodes[len(candidate.Nodes)-1].Errors = 1
+
+	result, err := Compare(document, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireFinding(t, result, "new_internal_node")
+	requireFinding(t, result, "new_error")
+	if result.Outcome != model.OutcomeFail {
+		t.Fatalf("outcome = %s, want %s", result.Outcome, model.OutcomeFail)
 	}
 }
 
@@ -102,6 +120,41 @@ func TestCompareCalculatesIncompleteTraceRateWithoutIntegerOverflow(t *testing.T
 	requireFinding(t, result, "incomplete_trace_rate")
 }
 
+func TestCompareCalculatesExactErrorRateIndependentlyOfNodeOrder(t *testing.T) {
+	document := fixtureBaseline()
+	document.Policies.NewInternalNode = model.SeverityIgnore
+	limit := math.Nextafter(0.5, 0)
+	document.Budgets.MaxErrorRate = &limit
+	large := 1 << 53
+	nodes := []analyze.NodeObservation{
+		{Key: document.Observed.Nodes[0].Key, Total: large, Errors: large / 2},
+		{Key: document.Observed.Nodes[1].Key, Total: 1, Errors: 1},
+		{Key: model.NodeKey{Service: "gateway", Name: "validate", Kind: model.SpanKindInternal}, Total: 2},
+	}
+	orders := [][]int{{0, 1, 2}, {1, 2, 0}, {2, 0, 1}}
+	var first Result
+	hasFirst := false
+	for iteration := 0; iteration < 30; iteration++ {
+		for _, order := range orders {
+			candidate := cloneObservation(document.Observed)
+			candidate.Nodes = []analyze.NodeObservation{nodes[order[0]], nodes[order[1]], nodes[order[2]]}
+			result, err := Compare(document, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requireFinding(t, result, "error_rate_exceeded")
+			if !hasFirst {
+				first = result
+				hasFirst = true
+				continue
+			}
+			if !reflect.DeepEqual(first, result) {
+				t.Fatalf("results differ for equivalent order %v:\n%#v\n%#v", order, first, result)
+			}
+		}
+	}
+}
+
 func TestCompareRejectsDuplicateObservations(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -151,6 +204,188 @@ func TestCompareRejectsDuplicateObservations(t *testing.T) {
 				t.Fatalf("error = %q, want %q", err, test.wantString)
 			}
 		})
+	}
+}
+
+func TestCompareRejectsMalformedObservations(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*baseline.Document, *analyze.Observation)
+		wantString string
+	}{
+		{
+			name: "baseline negative complete evidence",
+			mutate: func(document *baseline.Document, _ *analyze.Observation) {
+				document.Observed.Evidence.Complete = -1
+			},
+			wantString: "invalid baseline evidence complete: must be nonnegative",
+		},
+		{
+			name: "candidate negative incomplete evidence",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Evidence.Incomplete = -1
+			},
+			wantString: "invalid candidate evidence incomplete: must be nonnegative",
+		},
+		{
+			name: "candidate negative unmatched evidence",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Evidence.Unmatched = -1
+			},
+			wantString: "invalid candidate evidence unmatched: must be nonnegative",
+		},
+		{
+			name: "node count min exceeds max",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Counts = analyze.CountRange{Min: 2, Max: 1, Median: 1}
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER counts: min exceeds max",
+		},
+		{
+			name: "node count negative min",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Counts.Min = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER counts: min must be nonnegative",
+		},
+		{
+			name: "node count median is not finite",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Counts.Median = math.NaN()
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER counts: median must be finite",
+		},
+		{
+			name: "node count median outside range",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Counts.Median = 2
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER counts: median must be within min and max",
+		},
+		{
+			name: "edge count min exceeds max",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Edges[0].Counts = analyze.CountRange{Min: 2, Max: 1, Median: 1}
+			},
+			wantString: "invalid candidate edge gateway/checkout/SERVER -> gateway/db.query/CLIENT counts: min exceeds max",
+		},
+		{
+			name: "edge count negative max",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Edges[0].Counts.Max = -1
+			},
+			wantString: "invalid candidate edge gateway/checkout/SERVER -> gateway/db.query/CLIENT counts: max must be nonnegative",
+		},
+		{
+			name: "edge count median is not finite",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Edges[0].Counts.Median = math.Inf(1)
+			},
+			wantString: "invalid candidate edge gateway/checkout/SERVER -> gateway/db.query/CLIENT counts: median must be finite",
+		},
+		{
+			name: "edge count median outside range",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Edges[0].Counts.Median = 2
+			},
+			wantString: "invalid candidate edge gateway/checkout/SERVER -> gateway/db.query/CLIENT counts: median must be within min and max",
+		},
+		{
+			name: "node negative total",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Total = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER total: must be nonnegative",
+		},
+		{
+			name: "node negative errors",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Errors = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER errors: must be nonnegative",
+		},
+		{
+			name: "node negative samples",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Durations.Samples = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER duration samples: must be nonnegative",
+		},
+		{
+			name: "node negative p50",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Durations.P50 = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER duration p50: must be nonnegative",
+		},
+		{
+			name: "node negative p95",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Durations.P95 = -1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER duration p95: must be nonnegative",
+		},
+		{
+			name: "node errors exceed total",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Errors = candidate.Nodes[0].Total + 1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER errors: must not exceed total",
+		},
+		{
+			name: "node samples exceed total",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Durations.Samples = candidate.Nodes[0].Total + 1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER duration samples: must not exceed total",
+		},
+		{
+			name: "node p50 exceeds p95",
+			mutate: func(_ *baseline.Document, candidate *analyze.Observation) {
+				candidate.Nodes[0].Durations.P50 = candidate.Nodes[0].Durations.P95 + 1
+			},
+			wantString: "invalid candidate node gateway/checkout/SERVER durations: p50 must not exceed p95",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document := fixtureBaseline()
+			candidate := cloneObservation(document.Observed)
+			test.mutate(&document, &candidate)
+
+			_, err := Compare(document, candidate)
+			if err == nil {
+				t.Fatal("Compare succeeded")
+			}
+			if err.Error() != test.wantString {
+				t.Fatalf("error = %q, want %q", err, test.wantString)
+			}
+		})
+	}
+}
+
+func TestCompareSelectsKindlessP95BudgetTargetDeterministically(t *testing.T) {
+	internal := model.NodeKey{Service: "gateway", Name: "shared", Kind: model.SpanKindInternal}
+	server := model.NodeKey{Service: "gateway", Name: "shared", Kind: model.SpanKindServer}
+	limit := model.Duration(100 * time.Millisecond)
+	document := fixtureBaseline()
+	document.Observed.Nodes = []analyze.NodeObservation{
+		{Key: server, Total: 20, Durations: analyze.DurationSummary{Samples: 19, P95: limit}},
+		{Key: internal, Total: 20, Durations: analyze.DurationSummary{Samples: 18, P95: limit}},
+	}
+	document.Observed.Edges = nil
+	document.Budgets.Spans = []baseline.SpanBudget{{Service: "gateway", Name: "shared", P95: &limit}}
+	orders := [][]int{{0, 1}, {1, 0}}
+	const want = "insufficient complete samples for blocking p95 budget: gateway/shared/INTERNAL has 18"
+	for iteration := 0; iteration < 30; iteration++ {
+		for _, order := range orders {
+			candidate := cloneObservation(document.Observed)
+			candidate.Nodes = []analyze.NodeObservation{document.Observed.Nodes[order[0]], document.Observed.Nodes[order[1]]}
+			_, err := Compare(document, candidate)
+			if err == nil || err.Error() != want {
+				t.Fatalf("order %v: error = %v, want %q", order, err, want)
+			}
+		}
 	}
 }
 
@@ -265,7 +500,9 @@ func TestCompareDoesNotMutateInputs(t *testing.T) {
 	document := fixtureBaseline()
 	candidate := observationWithMultipleRegressions(document.Observed)
 	documentBefore := document
-	candidateBefore := candidate
+	documentBefore.Observed.Nodes = append([]analyze.NodeObservation(nil), document.Observed.Nodes...)
+	documentBefore.Observed.Edges = append([]analyze.EdgeObservation(nil), document.Observed.Edges...)
+	candidateBefore := cloneObservation(candidate)
 
 	if _, err := Compare(document, candidate); err != nil {
 		t.Fatal(err)
@@ -324,6 +561,13 @@ func addCrossServiceEdge(observation *analyze.Observation) {
 func addClientNode(observation *analyze.Observation) {
 	observation.Nodes = append(observation.Nodes, analyze.NodeObservation{
 		Key:    model.NodeKey{Service: "gateway", Name: "inventory.price", Kind: model.SpanKindClient},
+		Counts: analyze.CountRange{Min: 1, Max: 1, Median: 1}, Total: 20,
+	})
+}
+
+func addProducerNode(observation *analyze.Observation) {
+	observation.Nodes = append(observation.Nodes, analyze.NodeObservation{
+		Key:    model.NodeKey{Service: "gateway", Name: "orders.publish", Kind: model.SpanKindProducer},
 		Counts: analyze.CountRange{Min: 1, Max: 1, Median: 1}, Total: 20,
 	})
 }

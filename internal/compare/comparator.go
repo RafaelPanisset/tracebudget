@@ -4,6 +4,8 @@ package compare
 import (
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,12 @@ type Result struct {
 
 // Compare deterministically evaluates candidate behavior against document.
 func Compare(document baseline.Document, candidate analyze.Observation) (Result, error) {
+	if err := validateObservation(document.Observed, "baseline"); err != nil {
+		return Result{}, err
+	}
+	if err := validateObservation(candidate, "candidate"); err != nil {
+		return Result{}, err
+	}
 	if candidate.Evidence.Complete == 0 {
 		return Result{}, fmt.Errorf("%w: capture produced no comparable traces", ErrNoComparableTraces)
 	}
@@ -99,6 +107,9 @@ func compareNodes(document baseline.Document, base, candidate map[model.NodeKey]
 				code = "new_external_dependency"
 			}
 			findings = appendFinding(findings, code, severity, key.String(), "missing", "present")
+			if current.Errors > 0 {
+				findings = appendFinding(findings, "new_error", document.Policies.NewError, key.String(), "0", strconv.Itoa(current.Errors))
+			}
 			continue
 		}
 		if previous.Errors == 0 && current.Errors > 0 {
@@ -165,7 +176,8 @@ func compareBudgets(budgets baseline.Budgets, nodes map[model.NodeKey]analyze.No
 	findings := make([]model.Finding, 0)
 	for _, budget := range budgets.Spans {
 		matched := false
-		for key, node := range nodes {
+		for _, key := range sortedNodeKeys(nodes) {
+			node := nodes[key]
 			if !matchesBudget(key, budget) {
 				continue
 			}
@@ -188,20 +200,122 @@ func compareBudgets(budgets baseline.Budgets, nodes map[model.NodeKey]analyze.No
 		}
 	}
 	if budgets.MaxErrorRate != nil {
-		total, errorsTotal := 0.0, 0.0
-		for _, node := range nodes {
-			total += float64(node.Total)
-			errorsTotal += float64(node.Errors)
-		}
-		rate := 0.0
-		if total > 0 {
-			rate = errorsTotal / total
-		}
-		if rate > *budgets.MaxErrorRate {
-			findings = appendFinding(findings, "error_rate_exceeded", model.SeverityFail, "all spans", formatRate(*budgets.MaxErrorRate), formatRate(rate))
+		if rate := aggregateErrorRate(nodes); rate != nil {
+			limit := new(big.Rat).SetFloat64(*budgets.MaxErrorRate)
+			if limit != nil && rate.Cmp(limit) > 0 {
+				value, _ := rate.Float64()
+				findings = appendFinding(findings, "error_rate_exceeded", model.SeverityFail, "all spans", formatRate(*budgets.MaxErrorRate), formatRate(value))
+			}
 		}
 	}
 	return findings, nil
+}
+
+func validateObservation(observation analyze.Observation, source string) error {
+	for _, evidence := range []struct {
+		name  string
+		value int
+	}{
+		{"complete", observation.Evidence.Complete},
+		{"incomplete", observation.Evidence.Incomplete},
+		{"unmatched", observation.Evidence.Unmatched},
+	} {
+		if evidence.value < 0 {
+			return fmt.Errorf("invalid %s evidence %s: must be nonnegative", source, evidence.name)
+		}
+	}
+	for _, node := range observation.Nodes {
+		subject := source + " node " + node.Key.String()
+		if err := validateCountRange(node.Counts, subject); err != nil {
+			return err
+		}
+		if node.Total < 0 {
+			return fmt.Errorf("invalid %s total: must be nonnegative", subject)
+		}
+		if node.Errors < 0 {
+			return fmt.Errorf("invalid %s errors: must be nonnegative", subject)
+		}
+		if node.Errors > node.Total {
+			return fmt.Errorf("invalid %s errors: must not exceed total", subject)
+		}
+		if node.Durations.Samples < 0 {
+			return fmt.Errorf("invalid %s duration samples: must be nonnegative", subject)
+		}
+		if node.Durations.Samples > node.Total {
+			return fmt.Errorf("invalid %s duration samples: must not exceed total", subject)
+		}
+		if node.Durations.P50 < 0 {
+			return fmt.Errorf("invalid %s duration p50: must be nonnegative", subject)
+		}
+		if node.Durations.P95 < 0 {
+			return fmt.Errorf("invalid %s duration p95: must be nonnegative", subject)
+		}
+		if node.Durations.Samples > 0 && node.Durations.P50 > node.Durations.P95 {
+			return fmt.Errorf("invalid %s durations: p50 must not exceed p95", subject)
+		}
+	}
+	for _, edge := range observation.Edges {
+		if err := validateCountRange(edge.Counts, source+" edge "+edgeSubject(edge.Key)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCountRange(counts analyze.CountRange, subject string) error {
+	if counts.Min < 0 {
+		return fmt.Errorf("invalid %s counts: min must be nonnegative", subject)
+	}
+	if counts.Max < 0 {
+		return fmt.Errorf("invalid %s counts: max must be nonnegative", subject)
+	}
+	if counts.Min > counts.Max {
+		return fmt.Errorf("invalid %s counts: min exceeds max", subject)
+	}
+	if math.IsNaN(counts.Median) || math.IsInf(counts.Median, 0) {
+		return fmt.Errorf("invalid %s counts: median must be finite", subject)
+	}
+	if counts.Median < float64(counts.Min) || counts.Median > float64(counts.Max) {
+		return fmt.Errorf("invalid %s counts: median must be within min and max", subject)
+	}
+	return nil
+}
+
+func aggregateErrorRate(nodes map[model.NodeKey]analyze.NodeObservation) *big.Rat {
+	var total, errorsTotal big.Int
+	for _, node := range nodes {
+		total.Add(&total, big.NewInt(int64(node.Total)))
+		errorsTotal.Add(&errorsTotal, big.NewInt(int64(node.Errors)))
+	}
+	if total.Sign() == 0 {
+		return nil
+	}
+	return new(big.Rat).SetFrac(&errorsTotal, &total)
+}
+
+func sortedNodeKeys(nodes map[model.NodeKey]analyze.NodeObservation) []model.NodeKey {
+	keys := make([]model.NodeKey, 0, len(nodes))
+	for key := range nodes {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return compareNodeKeys(keys[i], keys[j]) < 0
+	})
+	return keys
+}
+
+func compareNodeKeys(left, right model.NodeKey) int {
+	for _, comparison := range []int{
+		strings.Compare(left.Service, right.Service),
+		strings.Compare(left.Name, right.Name),
+		strings.Compare(string(left.Kind), string(right.Kind)),
+		strings.Compare(left.Attributes, right.Attributes),
+	} {
+		if comparison != 0 {
+			return comparison
+		}
+	}
+	return 0
 }
 
 func insufficientSamples(subject string, samples int) error {
