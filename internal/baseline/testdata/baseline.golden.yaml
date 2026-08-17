@@ -1,0 +1,27 @@
+schema_version: 1
+scenario: checkout
+runs: 20
+root:
+  service: scenario
+  span: checkout
+  expected_per_run: 1
+policies:
+  new_service_edge: fail
+  new_external_dependency: fail
+  new_internal_node: warn
+  new_error: fail
+  removed_node: warn
+  removed_edge: warn
+  count_increase: fail
+  latency_increase: warn
+  incomplete_trace_rate:
+    max: 0
+observed:
+  nodes: []
+  edges: []
+  evidence:
+    complete: 20
+    incomplete: 0
+    unmatched: 0
+limitations:
+  - Upstream SDK sampling or drops before the TraceBudget receiver cannot be detected.
