@@ -16,14 +16,16 @@ func RenderTerminal(writer io.Writer, input Input) error {
 		}
 	} else {
 		var previousSeverity string
+		hasPreviousSeverity := false
 		for _, finding := range input.Result.Findings {
-			severity := upper(string(finding.Severity))
+			severity := terminalSeverity(finding.Severity)
 			currentSeverity := string(finding.Severity)
-			if currentSeverity != previousSeverity {
+			if !hasPreviousSeverity || currentSeverity != previousSeverity {
 				if _, err := fmt.Fprintf(writer, "%s:\n", severity); err != nil {
 					return err
 				}
 				previousSeverity = currentSeverity
+				hasPreviousSeverity = true
 			}
 			if _, err := fmt.Fprintf(writer, "[%s] %s %s baseline=%s candidate=%s\n",
 				severity, oneLine(finding.Code), oneLine(finding.Subject),

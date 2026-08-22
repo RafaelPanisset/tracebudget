@@ -2,7 +2,9 @@
 package report
 
 import (
+	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/RafaelPanisset/tracebudget/internal/analyze"
 	"github.com/RafaelPanisset/tracebudget/internal/compare"
@@ -34,7 +36,31 @@ func ExitCode(outcome model.Outcome) int {
 }
 
 func oneLine(value string) string {
-	return strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(value)
+	var output strings.Builder
+	output.Grow(len(value))
+	previousCarriageReturn := false
+	for _, character := range value {
+		switch {
+		case character == '\r':
+			output.WriteByte(' ')
+			previousCarriageReturn = true
+		case character == '\n':
+			if !previousCarriageReturn {
+				output.WriteByte(' ')
+			}
+			previousCarriageReturn = false
+		case character == '\u2028' || character == '\u2029':
+			output.WriteByte(' ')
+			previousCarriageReturn = false
+		case unicode.IsControl(character):
+			fmt.Fprintf(&output, "\\u%04X", character)
+			previousCarriageReturn = false
+		default:
+			output.WriteRune(character)
+			previousCarriageReturn = false
+		}
+	}
+	return output.String()
 }
 
 func markdownText(value string) string {
@@ -48,4 +74,12 @@ func markdownCode(value string) string {
 
 func upper(value string) string {
 	return strings.ToUpper(oneLine(value))
+}
+
+func terminalSeverity(value model.Severity) string {
+	severity := upper(string(value))
+	if severity == "" {
+		return "UNKNOWN"
+	}
+	return severity
 }

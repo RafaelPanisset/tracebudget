@@ -79,6 +79,21 @@ func TestRenderTerminalGroupsContiguousSeveritiesWithoutReorderingFindings(t *te
 	}
 }
 
+func TestRenderTerminalGroupsZeroAndCustomSeveritiesWithoutReorderingFindings(t *testing.T) {
+	input := Input{Result: compare.Result{Findings: []model.Finding{
+		{Code: "zero", Subject: "one", Baseline: "1", Candidate: "2"},
+		{Code: "custom", Severity: model.Severity("custom\nseverity"), Subject: "two", Baseline: "1", Candidate: "2"},
+	}}}
+	var output bytes.Buffer
+	if err := RenderTerminal(&output, input); err != nil {
+		t.Fatal(err)
+	}
+	want := "UNKNOWN:\n[UNKNOWN] zero one baseline=1 candidate=2\nCUSTOM SEVERITY:\n[CUSTOM SEVERITY] custom two baseline=1 candidate=2\n"
+	if !strings.Contains(output.String(), want) {
+		t.Fatalf("zero and custom severities did not form stable groups in supplied order:\n%s", output.String())
+	}
+}
+
 func TestRenderIncludesOptionalArtifactsAndLimitations(t *testing.T) {
 	input := failureInput()
 	input.ArtifactPath = "artifacts/checkout.trace"
@@ -157,6 +172,67 @@ func TestRenderMarkdownPlainTextEscapesBackticks(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownSanitizesTypedOutcomeAndSeverity(t *testing.T) {
+	input := Input{
+		Scenario: "checkout",
+		Result: compare.Result{
+			Outcome: model.Outcome("out|`\r\ncome"),
+			Findings: []model.Finding{{
+				Code: "code", Severity: model.Severity("sev|`\r\nity"), Subject: "subject", Baseline: "1", Candidate: "2",
+			}},
+		},
+	}
+	var output bytes.Buffer
+	if err := RenderMarkdown(&output, input); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "# TraceBudget: checkout — OUT\\|' COME\n") {
+		t.Fatalf("outcome escaped its heading context: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "| SEV\\|' ITY | `code` |") {
+		t.Fatalf("severity escaped its table context: %q", output.String())
+	}
+	if strings.Contains(output.String(), "\r") || strings.Contains(output.String(), "\nCOME") || strings.Contains(output.String(), "\nITY") {
+		t.Fatalf("typed value escaped a Markdown line context: %q", output.String())
+	}
+}
+
+func TestRenderTerminalSanitizesLayoutControlsInAllUserFields(t *testing.T) {
+	input := Input{
+		Scenario: terminalControlValue("scenario"),
+		Result: compare.Result{
+			Outcome: model.Outcome(terminalControlValue("outcome")),
+			Findings: []model.Finding{{
+				Code: terminalControlValue("code"), Severity: model.Severity(terminalControlValue("severity")),
+				Subject: terminalControlValue("subject"), Baseline: terminalControlValue("baseline"), Candidate: terminalControlValue("candidate"),
+			}},
+		},
+		Observation: analyze.Observation{Nodes: []analyze.NodeObservation{{
+			Key:       model.NodeKey{Service: terminalControlValue("node"), Name: "span", Kind: model.SpanKindClient},
+			Durations: analyze.DurationSummary{Samples: 1},
+		}}},
+		ArtifactPath: terminalControlValue("artifact"), Limitations: []string{terminalControlValue("limitation")},
+	}
+	var output bytes.Buffer
+	if err := RenderTerminal(&output, input); err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{"scenario", "outcome", "severity", "code", "subject", "baseline", "candidate", "node", "artifact", "limitation"} {
+		expected := escapedTerminalControlValue(label)
+		if label == "outcome" || label == "severity" {
+			expected = strings.ToUpper(expected)
+		}
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("%s was not visibly escaped: %q", label, output.String())
+		}
+	}
+	for _, control := range []string{"\x1b", "\v", "\f", "\u0085", "\u2028", "\u2029"} {
+		if strings.Contains(output.String(), control) {
+			t.Fatalf("output contains terminal layout control %q: %q", control, output.String())
+		}
+	}
+}
+
 func TestRenderDoesNotMutateInputAndIsStable(t *testing.T) {
 	input := failureInput()
 	input.Limitations = []string{"first", "second"}
@@ -184,14 +260,31 @@ func TestRenderDoesNotMutateInputAndIsStable(t *testing.T) {
 	}
 }
 
-func TestRenderPropagatesWriterErrors(t *testing.T) {
-	want := errors.New("writer failed")
-	for name, render := range map[string]func(io.Writer, Input) error{"terminal": RenderTerminal, "markdown": RenderMarkdown} {
-		t.Run(name, func(t *testing.T) {
-			if err := render(errorWriter{err: want}, failureInput()); !errors.Is(err, want) {
-				t.Fatalf("error = %v, want %v", err, want)
-			}
-		})
+func TestRenderPropagatesWriterErrorsFromMandatoryAndOptionalSections(t *testing.T) {
+	input := failureInput()
+	input.ArtifactPath = "artifact"
+	input.Limitations = []string{"limitation"}
+	tests := []struct {
+		name    string
+		render  func(io.Writer, Input) error
+		markers []string
+	}{
+		{name: "terminal", render: RenderTerminal, markers: []string{"Evidence:", "Timing:", "Samples:", "Artifacts:", "Limitations:"}},
+		{name: "markdown", render: RenderMarkdown, markers: []string{"## Evidence", "## Timing", "## Metric samples", "## Retained artifacts", "## Limitations"}},
+	}
+	for _, test := range tests {
+		for _, marker := range test.markers {
+			t.Run(test.name+"/"+marker, func(t *testing.T) {
+				want := errors.New("writer failed at " + marker)
+				writer := markerErrorWriter{marker: marker, err: want}
+				if err := test.render(&writer, input); !errors.Is(err, want) {
+					t.Fatalf("error = %v, want %v", err, want)
+				}
+				if !strings.Contains(writer.output.String(), previousSectionMarker(test.markers, marker)) && marker != test.markers[0] {
+					t.Fatalf("renderer did not reach the section before %q: %q", marker, writer.output.String())
+				}
+			})
+		}
 	}
 }
 
@@ -232,6 +325,32 @@ func cloneInput(input Input) Input {
 	return copy
 }
 
-type errorWriter struct{ err error }
+func terminalControlValue(label string) string {
+	return label + " café 東京 🐙\x1b[31mred\x1b[0m\v\f\u0085\u2028\u2029"
+}
 
-func (writer errorWriter) Write([]byte) (int, error) { return 0, writer.err }
+func escapedTerminalControlValue(label string) string {
+	return label + " café 東京 🐙\\u001B[31mred\\u001B[0m\\u000B\\u000C\\u0085  "
+}
+
+func previousSectionMarker(markers []string, marker string) string {
+	for index, value := range markers {
+		if value == marker && index > 0 {
+			return markers[index-1]
+		}
+	}
+	return ""
+}
+
+type markerErrorWriter struct {
+	marker string
+	err    error
+	output bytes.Buffer
+}
+
+func (writer *markerErrorWriter) Write(value []byte) (int, error) {
+	if strings.Contains(string(value), writer.marker) {
+		return 0, writer.err
+	}
+	return writer.output.Write(value)
+}

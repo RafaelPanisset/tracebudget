@@ -7,7 +7,7 @@ import (
 
 // RenderMarkdown writes a stable Markdown report for saved CI artifacts.
 func RenderMarkdown(writer io.Writer, input Input) error {
-	if _, err := fmt.Fprintf(writer, "# TraceBudget: %s — %s\n\n", markdownText(input.Scenario), upper(string(input.Result.Outcome))); err != nil {
+	if _, err := fmt.Fprintf(writer, "# TraceBudget: %s — %s\n\n", markdownText(input.Scenario), markdownText(upper(string(input.Result.Outcome)))); err != nil {
 		return err
 	}
 	if len(input.Result.Findings) == 0 {
@@ -20,7 +20,7 @@ func RenderMarkdown(writer io.Writer, input Input) error {
 		}
 		for _, finding := range input.Result.Findings {
 			if _, err := fmt.Fprintf(writer, "| %s | `%s` | `%s` | `%s` | `%s` |\n",
-				upper(string(finding.Severity)), markdownCode(finding.Code), markdownCode(finding.Subject),
+				markdownText(upper(string(finding.Severity))), markdownCode(finding.Code), markdownCode(finding.Subject),
 				markdownCode(finding.Baseline), markdownCode(finding.Candidate)); err != nil {
 				return err
 			}
