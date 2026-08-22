@@ -38,11 +38,12 @@ func oneLine(value string) string {
 }
 
 func markdownText(value string) string {
-	return strings.ReplaceAll(oneLine(value), "|", "\\|")
+	value = strings.ReplaceAll(oneLine(value), "|", "\\|")
+	return strings.ReplaceAll(value, "`", "'")
 }
 
 func markdownCode(value string) string {
-	return strings.ReplaceAll(markdownText(value), "`", "'")
+	return markdownText(value)
 }
 
 func upper(value string) string {

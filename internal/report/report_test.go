@@ -62,6 +62,23 @@ func TestRenderPassWithoutFindings(t *testing.T) {
 	}
 }
 
+func TestRenderTerminalGroupsContiguousSeveritiesWithoutReorderingFindings(t *testing.T) {
+	input := Input{Result: compare.Result{Findings: []model.Finding{
+		{Code: "first_fail", Severity: model.SeverityFail, Subject: "one", Baseline: "1", Candidate: "2"},
+		{Code: "second_fail", Severity: model.SeverityFail, Subject: "two", Baseline: "1", Candidate: "2"},
+		{Code: "warning", Severity: model.SeverityWarn, Subject: "three", Baseline: "1", Candidate: "2"},
+		{Code: "last_fail", Severity: model.SeverityFail, Subject: "four", Baseline: "1", Candidate: "2"},
+	}}}
+	var output bytes.Buffer
+	if err := RenderTerminal(&output, input); err != nil {
+		t.Fatal(err)
+	}
+	want := "FAIL:\n[FAIL] first_fail one baseline=1 candidate=2\n[FAIL] second_fail two baseline=1 candidate=2\nWARN:\n[WARN] warning three baseline=1 candidate=2\nFAIL:\n[FAIL] last_fail four baseline=1 candidate=2\n"
+	if !strings.Contains(output.String(), want) {
+		t.Fatalf("findings are not grouped in supplied order:\n%s", output.String())
+	}
+}
+
 func TestRenderIncludesOptionalArtifactsAndLimitations(t *testing.T) {
 	input := failureInput()
 	input.ArtifactPath = "artifacts/checkout.trace"
@@ -116,6 +133,27 @@ func TestRenderSanitizesUserControlledValues(t *testing.T) {
 				t.Fatalf("markdown did not keep pipe and backtick inside its table context: %q", output.String())
 			}
 		})
+	}
+}
+
+func TestRenderMarkdownPlainTextEscapesBackticks(t *testing.T) {
+	input := Input{
+		Scenario:    "checkout `scenario`",
+		Result:      compare.Result{Outcome: model.OutcomePass},
+		Limitations: []string{"```"},
+	}
+	var output bytes.Buffer
+	if err := RenderMarkdown(&output, input); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "# TraceBudget: checkout 'scenario' — PASS\n") {
+		t.Fatalf("scenario did not remain plain heading text: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "## Limitations\n\n- '''\n") {
+		t.Fatalf("limitation did not remain an ordinary list item: %q", output.String())
+	}
+	if strings.Contains(output.String(), "```") {
+		t.Fatalf("output contains a fenced-code delimiter: %q", output.String())
 	}
 }
 
