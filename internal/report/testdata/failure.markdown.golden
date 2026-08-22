@@ -1,0 +1,30 @@
+# TraceBudget: checkout — FAIL
+
+| Severity | Code | Subject | Baseline | Candidate |
+| --- | --- | --- | --- | --- |
+| FAIL | `count_increase` | `gateway/db.query/CLIENT` | `1` | `2` |
+| WARN | `removed_edge` | `gateway/checkout/SERVER -> inventory/reserve/SERVER` | `present` | `missing` |
+
+## Evidence
+
+- Complete traces: 20
+- Incomplete traces: 0
+- Received spans: 80
+- Exact duplicates: 0
+- Unmatched traces: 0
+- Invalid spans: 0
+- Current buffer depth: 0
+- Peak buffer depth: 0
+
+## Timing
+
+- SQLite writes: 0s
+- Assembly: 0s
+- Normalization: 0s
+- Comparison: 0s
+
+## Metric samples
+
+| Span | Duration samples |
+| --- | ---: |
+| `gateway/db.query/CLIENT` | 20 |
