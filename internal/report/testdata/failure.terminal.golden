@@ -1,0 +1,9 @@
+FAIL checkout
+
+[FAIL] count_increase gateway/db.query/CLIENT baseline=1 candidate=2
+[WARN] removed_edge gateway/checkout/SERVER -> inventory/reserve/SERVER baseline=present candidate=missing
+
+Evidence: complete=20 incomplete=0 received=80 duplicate=0 unmatched=0 invalid=0 buffer_current=0 buffer_peak=0
+Timing: sqlite=0s assembly=0s normalization=0s comparison=0s
+Samples:
+- gateway/db.query/CLIENT=20
